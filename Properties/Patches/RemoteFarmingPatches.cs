@@ -1,6 +1,8 @@
+using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using HarmonyLib;
+using UnityEngine;
 
 namespace RemoteWorkerFarming.Patches
 {
@@ -83,63 +85,104 @@ namespace RemoteWorkerFarming.Patches
         }
     }
 
-    // 崩溃修复：
+    // 崩溃修复 + 收获动画：
     // 植物的 Harvestable/Uprootable 使用 multitoolContext("harvest")，
     // 因此 StandardWorker.StartWork 会走 multitool 路径并 StartSM()，
     // 而 MultitoolController.InitializeStates 第一步即 ToggleSnapOn("dig")，
-    // 它需要 worker 身上的 SnapOn 组件。复制人有 SnapOn，但坞派出的机器人
-    // RemoteWorker 没有，于是抛出 "RemoteWorker does not have component SnapOn"
-    // 并在后续空引用处崩溃。
+    // 它会调用 worker.Get<SnapOn>().AttachSnapOnByName("dig")。坞派出的
+    // RemoteWorker 没有 SnapOn 组件，于是抛出
+    // "RemoteWorker does not have component SnapOn" 并崩溃。
     //
-    // 这里只在 worker 为 RemoteWorker 时关闭 multitool 路径，改走"操作机器"
-    // 交互动画(override anims)。复制人(worker 非 RemoteWorker)原样走 multitool
-    // 砍击逻辑，零影响。
-    [HarmonyPatch(typeof(Workable), nameof(Workable.GetAnim))]
-    internal static class Workable_GetAnim_RemoteWorker_Patch
+    // 解决思路（参考侦查者 ScoutRover/BaseRover 与复制人 BaseMinionConfig）：
+    // RemoteWorker 本质是"复制人骨架"(body_comp_default + snapTo_rgtHand)，
+    // 因此最自然的做法不是关闭 multitool 路径，而是把复制人现成的装配补齐：
+    //   1) 补加载 anim_construction_default_kanim —— 复制人的挥动作 kanim，
+    //      含 multitool 路径需要的 dig_fwd_pre/loop/pst 等动画；RemoteWorker
+    //      默认未加载，缺它会"读条无动画"。
+    //   2) 照抄复制人的 SnapOn 配置（snapTo_rgtHand 上挂各 context 对应工具，
+    //      harvest/tend -> plant_harvester_gun_kanim），既修复崩溃，又让机器人
+    //      真正"手持收割枪挥动"，视觉与复制人一致。
+    // 复制人本身不受影响（其 prefab 是 MinionConfig，不是 RemoteWorkerConfig）。
+    [HarmonyPatch(typeof(RemoteWorkerConfig), nameof(RemoteWorkerConfig.CreatePrefab))]
+    internal static class RemoteWorkerConfig_CreatePrefab_Patch
     {
-        private static KAnimFile[] interactAnims;
-
-        private static void Postfix(WorkerBase worker, ref Workable.AnimInfo __result)
+        private static void Postfix(GameObject __result)
         {
-            // 仅处理走 multitool 路径(smi != null)的情形
-            if (__result.smi == null)
+            if (__result == null)
             {
                 return;
             }
 
-            // 仅对远程机器人生效
-            if (!(worker is RemoteWorker))
+            EnsureWorkAnimsLoaded(__result);
+            EnsureSnapOn(__result);
+        }
+
+        // 把复制人挥动作 kanim 追加进 RemoteWorker 的 AnimFiles。
+        private static void EnsureWorkAnimsLoaded(GameObject prefab)
+        {
+            KBatchedAnimController kbac = prefab.GetComponent<KBatchedAnimController>();
+            if (kbac == null)
             {
                 return;
             }
 
-            // 防御性判断：若该 worker 恰好拥有 SnapOn 组件，则无需改写
-            if (worker.GetComponent<SnapOn>() != null)
+            KAnimFile workAnim = Assets.GetAnim("anim_construction_default_kanim");
+            if (workAnim == null)
             {
                 return;
             }
 
-            // 关闭 multitool 路径。这个尚未 StartSM 的 MultitoolController 实例
-            // 直接丢弃即可，不会产生副作用。
-            __result.smi = null;
-
-            // 改用"操作机器"交互动画。Workable.workAnims 默认值为
-            // { "working_pre", "working_loop" }，而 anim_interacts_fabricator_generic_kanim
-            // 内含这两个动画，可被 StandardWorker.StartWork 的 override 路径正常播放。
-            if (interactAnims == null)
+            KAnimFile[] existing = kbac.AnimFiles ?? new KAnimFile[0];
+            foreach (KAnimFile f in existing)
             {
-                KAnimFile anim = Assets.GetAnim("anim_interacts_fabricator_generic_kanim");
-                if (anim != null)
+                if (f == workAnim)
                 {
-                    interactAnims = new[] { anim };
+                    return; // 已加载，避免重复
                 }
             }
 
-            if (interactAnims != null &&
-                (__result.overrideAnims == null || __result.overrideAnims.Length == 0))
+            var list = new List<KAnimFile>(existing) { workAnim };
+            kbac.AnimFiles = list.ToArray();
+        }
+
+        // 照抄复制人(BaseMinionConfig)的 SnapOn 配置。RemoteWorker 共用复制人骨架，
+        // snapTo_rgtHand 符号存在，故可直接复用。
+        private static void EnsureSnapOn(GameObject prefab)
+        {
+            if (prefab.GetComponent<SnapOn>() != null)
             {
-                __result.overrideAnims = interactAnims;
+                return;
             }
+
+            SnapOn snapOn = prefab.AddOrGet<SnapOn>();
+            snapOn.snapPoints = new List<SnapOn.SnapPoint>
+            {
+                MakeHandPoint("dig", "excavator_kanim"),
+                MakeHandPoint("build", "constructor_gun_kanim"),
+                MakeHandPoint("fetchliquid", "water_gun_kanim"),
+                MakeHandPoint("paint", "painting_gun_kanim"),
+                MakeHandPoint("harvest", "plant_harvester_gun_kanim"),
+                MakeHandPoint("capture", "net_gun_kanim"),
+                MakeHandPoint("attack", "attack_gun_kanim"),
+                MakeHandPoint("pickup", "pickupdrop_gun_kanim"),
+                MakeHandPoint("store", "pickupdrop_gun_kanim"),
+                MakeHandPoint("disinfect", "plant_spray_gun_kanim"),
+                MakeHandPoint("tend", "plant_harvester_gun_kanim")
+            };
+        }
+
+        // 构造一个挂在右手(snapTo_rgtHand)、pointName 固定为 "dig"
+        // (MultitoolController.ToggleSnapOn("dig") 用)、按 context 区分工具的挂载点。
+        private static SnapOn.SnapPoint MakeHandPoint(string context, string buildKanim)
+        {
+            return new SnapOn.SnapPoint
+            {
+                pointName = "dig",
+                automatic = false,
+                context = context,
+                buildFile = Assets.GetAnim(buildKanim),
+                overrideSymbol = "snapTo_rgtHand"
+            };
         }
     }
 }
