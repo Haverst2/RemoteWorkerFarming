@@ -1,0 +1,6 @@
+E:\code_c++\mod\RemoteWorkerFarming\RemoteWorkerFarming\obj\Debug\RemoteWorkerFarming.csproj.AssemblyReference.cache
+E:\code_c++\mod\RemoteWorkerFarming\RemoteWorkerFarming\obj\Debug\RemoteWorkerFarming.csproj.CoreCompileInputs.cache
+E:\code_c++\mod\RemoteWorkerFarming\RemoteWorkerFarming\bin\Debug\RemoteWorkerFarming.dll
+E:\code_c++\mod\RemoteWorkerFarming\RemoteWorkerFarming\bin\Debug\RemoteWorkerFarming.pdb
+E:\code_c++\mod\RemoteWorkerFarming\RemoteWorkerFarming\obj\Debug\RemoteWorkerFarming.dll
+E:\code_c++\mod\RemoteWorkerFarming\RemoteWorkerFarming\obj\Debug\RemoteWorkerFarming.pdb
